@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GeoSustain — Sustainability & Climate Health</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body class="bg-slate-950 text-slate-100">
+    <div class="min-h-screen">
+      <header class="sticky top-0 z-10 border-b border-slate-800 bg-slate-950/80 backdrop-blur">
+        <div class="mx-auto max-w-7xl px-4 py-4">
+          <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div class="flex items-center gap-3">
+              <div class="h-10 w-10 rounded-xl bg-emerald-500/15 ring-1 ring-emerald-400/30 flex items-center justify-center">
+                <span class="text-xl">🌿</span>
+              </div>
+              <div>
+                <h1 class="text-lg font-semibold">GeoSustain</h1>
+                <p class="text-sm text-slate-400">Real-time air & climate health insights</p>
+              </div>
+            </div>
+
+            <div class="flex items-center gap-2">
+              <div class="relative w-full md:w-96">
+                <input
+                  id="searchInput"
+                  type="text"
+                  placeholder="Search a city or region (e.g., Delhi, Nairobi, São Paulo)"
+                  class="w-full rounded-xl border border-slate-800 bg-slate-900 px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-emerald-400/40"
+                />
+                <div id="searchResults" class="absolute left-0 right-0 mt-2 hidden rounded-xl border border-slate-800 bg-slate-950 overflow-hidden">
+                  <div class="p-2 text-xs text-slate-400">Select a location</div>
+                  <div id="resultsList" class="max-h-64 overflow-auto"></div>
+                </div>
+              </div>
+              <button
+                id="useMyLocation"
+                class="whitespace-nowrap rounded-xl bg-emerald-500 px-4 py-3 text-sm font-semibold text-slate-950 hover:bg-emerald-400"
+              >
+                Use my location
+              </button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <main class="mx-auto max-w-7xl px-4 py-6">
+        <div class="grid grid-cols-1 gap-4 lg:grid-cols-12">
+          <section class="lg:col-span-8">
+            <div class="rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
+              <div class="flex items-start justify-between gap-4">
+                <div>
+                  <h2 class="text-base font-semibold">Interactive Map</h2>
+                  <p class="text-sm text-slate-400">Marker color reflects local AQI-like band</p>
+                </div>
+                <div class="text-right">
+                  <div id="locationLabel" class="text-sm text-slate-200 font-medium">—</div>
+                  <div id="coordsLabel" class="text-xs text-slate-500">—</div>
+                </div>
+              </div>
+              <div class="mt-4">
+                <div id="map" class="h-[420px] w-full rounded-xl ring-1 ring-slate-800 overflow-hidden"></div>
+              </div>
+              <div class="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div class="rounded-xl border border-slate-800 bg-slate-950/40 p-3">
+                  <div class="text-xs text-slate-400">AQI-like band</div>
+                  <div id="aqiBand" class="text-lg font-semibold">—</div>
+                </div>
+                <div class="rounded-xl border border-slate-800 bg-slate-950/40 p-3">
+                  <div class="text-xs text-slate-400">AQI-like value</div>
+                  <div id="aqiValue" class="text-lg font-semibold">—</div>
+                </div>
+                <div class="rounded-xl border border-slate-800 bg-slate-950/40 p-3">
+                  <div class="text-xs text-slate-400">Climate Health Score</div>
+                  <div class="flex items-center justify-between">
+                    <div>
+                      <div id="score" class="text-lg font-semibold">—</div>
+                      <div class="text-xs text-slate-400">0–100</div>
+                    </div>
+                    <div id="scoreBadge" class="h-10 w-10 rounded-xl bg-emerald-500/15 ring-1 ring-emerald-400/30 flex items-center justify-center">🌍</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="mt-4 rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
+              <div class="flex items-start justify-between gap-4">
+                <div>
+                  <h3 class="text-base font-semibold">7-Day Trend Analytics</h3>
+                  <p class="text-sm text-slate-400">Temperature max trend (proxy timeline)</p>
+                </div>
+              </div>
+              <div class="mt-4">
+                <canvas id="trendChart" height="160"></canvas>
+              </div>
+            </div>
+          </section>
+
+          <aside class="lg:col-span-4">
+            <div class="rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
+              <h3 class="text-base font-semibold">AQI & Environment Details</h3>
+              <p class="text-sm text-slate-400">Lightweight interpretation from public API data</p>
+
+              <div class="mt-4 space-y-2 text-sm">
+                <div class="flex items-center justify-between">
+                  <span class="text-slate-400">PM2.5</span>
+                  <span id="pm25" class="font-medium">—</span>
+                </div>
+                <div class="flex items-center justify-between">
+                  <span class="text-slate-400">PM10</span>
+                  <span id="pm10" class="font-medium">—</span>
+                </div>
+                <div class="flex items-center justify-between">
+                  <span class="text-slate-400">Ozone</span>
+                  <span id="ozone" class="font-medium">—</span>
+                </div>
+                <div class="flex items-center justify-between">
+                  <span class="text-slate-400">Wind (10m)</span>
+                  <span id="wind" class="font-medium">—</span>
+                </div>
+              </div>
+
+              <div class="mt-5 rounded-xl border border-slate-800 bg-slate-950/40 p-3">
+                <div class="text-xs text-slate-400">AI Smart Interpretation</div>
+                <div id="aiHeadline" class="mt-1 text-sm font-semibold">—</div>
+                <div id="aiBody" class="mt-2 text-sm text-slate-300 leading-relaxed">—</div>
+              </div>
+            </div>
+
+            <div class="mt-4 rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
+              <h3 class="text-base font-semibold">How it works</h3>
+              <ul class="mt-3 space-y-2 text-sm text-slate-300">
+                <li>• Search a location → map centers with a color-coded marker.</li>
+                <li>• We pull free metrics from Open-Meteo public APIs.</li>
+                <li>• Climate Health Score merges air + wind + simple risk heuristics.</li>
+                <li>• The “AI” panel is rule-based (hackathon-friendly, no API key).</li>
+              </ul>
+            </div>
+          </aside>
+        </div>
+      </main>
+
+      <footer class="mx-auto max-w-7xl px-4 pb-8">
+        <div class="border-t border-slate-800 pt-5 text-xs text-slate-500">
+          Data sources: Open-Meteo (Air Quality + Weather) • Map: OpenStreetMap tiles via Leaflet
+        </div>
+      </footer>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
+

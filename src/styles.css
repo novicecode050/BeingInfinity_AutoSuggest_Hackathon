@@ -1,0 +1,4 @@
+/* Minimal extra styling; Tailwind handles the rest */
+#map { background: #0b1220; }
+.leaflet-control-container .leaflet-top.leaflet-right { z-index: 999; }
+

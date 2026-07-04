@@ -1,0 +1,9 @@
+{
+  "name": "geosustain-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "index.js",
+  "dependencies": {}
+}
+
