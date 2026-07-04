@@ -6,7 +6,8 @@
 - [x] Implement “AI Smart Interpretation” panel (rule-based summary; no paid API key required)
 - [x] Update README with setup/run/deploy instructions
 - [ ] Create git branch `blackboxai/geo-sustain`, commit with clear messages, and push
-- [ ] Smoke test locally: search, map render, chart render
+- [x] Smoke test locally: search, map render, chart render
+
 
 
 
