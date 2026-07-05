@@ -50,13 +50,17 @@ npm run dev
 Create a `.env` file in the project root (optional for the AI Health Companion):
 
 ```env
-# OpenAI-compatible Chat Completions
-VITE_LLM_API_URL=https://api.openai.com/v1/chat/completions
-VITE_OPENAI_API_KEY=your_key_here
-VITE_LLM_MODEL=gpt-4o-mini
+# OpenAI-compatible Chat Completions (used by the app)
+# Provide an OpenAI-compatible endpoint URL.
+# Example endpoint:
+#   https://api.openai.com/v1/chat/completions
+VITE_LLM_ENDPOINT=your_openai_compatible_chat_endpoint
+
+# API key used as Bearer token.
+VITE_LLM_API_KEY=your_key_here
 ```
 
-> Note: If the LLM API key is missing, GeoSustain automatically falls back to the built-in rule-based insights. Open-Meteo + Nominatim work without keys.
+> Note: If `VITE_LLM_API_KEY` or `VITE_LLM_ENDPOINT` is missing, GeoSustain automatically falls back to the built-in rule-based insights. Open-Meteo + Nominatim work without keys.
 
 
 ## 📊 End Users

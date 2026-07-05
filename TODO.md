@@ -5,7 +5,11 @@
 - [x] Implement Interactive Climate Health Score widget with metric toggles/weights (score updates immediately)
 - [x] Update README.md with LLM API env var instructions
 - [x] Run app (npm run dev) and verify all UI requirements render and score changes correctly
-- [x] git add/commit with proper message and push
+- [ ] git add/commit with proper message and push
+
+
+
+
 
 
 

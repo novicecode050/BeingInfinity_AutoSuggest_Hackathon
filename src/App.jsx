@@ -1,6 +1,6 @@
-import React, { useEffect, useMemo, useState } from 'react'
-import { MapContainer, TileLayer, Marker, Popup, Circle, useMap } from 'react-leaflet'
-import { Line } from 'react-chartjs-2'
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
+import { Line } from 'react-chartjs-2';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -11,11 +11,10 @@ import {
   Tooltip,
   Legend,
   Filler
-} from 'chart.js'
-import axios from 'axios'
-import L from 'leaflet'
+} from 'chart.js';
+import axios from 'axios';
+import L from 'leaflet';
 
-// Register Chart.js components
 ChartJS.register(
   CategoryScale,
   LinearScale,
@@ -25,434 +24,628 @@ ChartJS.register(
   Tooltip,
   Legend,
   Filler
-)
+);
 
-
-// AQI color function
 const getAQIColor = (aqi) => {
-  if (aqi <= 50) return '#00E400' // Good
-  if (aqi <= 100) return '#FFFF00' // Moderate
-  if (aqi <= 150) return '#FF7E00' // Sensitive
-  if (aqi <= 200) return '#FF0000' // Unhealthy
-  if (aqi <= 300) return '#8F3F97' // Very Unhealthy
-  return '#7E0023' // Hazardous
-}
+  if (aqi <= 50) return '#00E400'; // Good
+  if (aqi <= 100) return '#FFFF00'; // Moderate
+  if (aqi <= 150) return '#FF7E00'; // Sensitive
+  if (aqi <= 200) return '#FF0000'; // Unhealthy
+  if (aqi <= 300) return '#8F3F97'; // Very Unhealthy
+  return '#7E0023'; // Hazardous
+};
 
 const getAQILabel = (aqi) => {
-  if (aqi <= 50) return 'Good'
-  if (aqi <= 100) return 'Moderate'
-  if (aqi <= 150) return 'Sensitive'
-  if (aqi <= 200) return 'Unhealthy'
-  if (aqi <= 300) return 'Very Unhealthy'
-  return 'Hazardous'
-}
+  if (aqi <= 50) return 'Good';
+  if (aqi <= 100) return 'Moderate';
+  if (aqi <= 150) return 'Sensitive';
+  if (aqi <= 200) return 'Unhealthy';
+  if (aqi <= 300) return 'Very Unhealthy';
+  return 'Hazardous';
+};
 
-// Map component that updates when location changes
 function MapController({ position }) {
-  const map = useMap()
+  const map = useMap();
   useEffect(() => {
-    if (position) {
-      map.setView(position, 10)
-    }
-  }, [position, map])
-  return null
+    if (position) map.setView(position, 10);
+  }, [position, map]);
+  return null;
 }
 
-function App() {
-  const [searchQuery, setSearchQuery] = useState('')
-  const [position, setPosition] = useState([20.5937, 78.9629]) // Default: India center
-  const [locationName, setLocationName] = useState('India')
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
+}
 
-  // Current point data
-  const [airQualityData, setAirQualityData] = useState(null)
-  const [weatherData, setWeatherData] = useState(null)
-  const [historicalData, setHistoricalData] = useState(null)
+// Simplified AQI calculation based on PM2.5
+function calculateAQI_PM25(pm25) {
+  const v = pm25 || 0;
+  if (v <= 12) return Math.round((v / 12) * 50);
+  if (v <= 35.4) return Math.round(((v - 12) / (35.4 - 12)) * 50 + 50);
+  if (v <= 55.4) return Math.round(((v - 35.4) / (55.4 - 35.4)) * 50 + 100);
+  if (v <= 150.4) return Math.round(((v - 55.4) / (150.4 - 55.4)) * 50 + 150);
+  if (v <= 250.4) return Math.round(((v - 150.4) / (250.4 - 150.4)) * 50 + 200);
+  if (v <= 350.4) return Math.round(((v - 250.4) / (350.4 - 250.4)) * 50 + 300);
+  return 400;
+}
 
-  // Neighborhood drill-down
-  const [drillRadiusKm, setDrillRadiusKm] = useState(1)
-  const [neighborhoodStats, setNeighborhoodStats] = useState(null) // { aqiAvg, aqiMin, aqiMax, samples: [...] }
+// Score is computed from selected metrics and weights.
+function calculateClimateScoreFromMetrics({ aqi, uvIndex, temperature, humidity, windSpeed }, weights) {
+  // Metric -> normalized penalty contribution in [0..100] scaled by weight.
+  // Higher score is better.
+  let base = 100;
 
-  const [loading, setLoading] = useState(false)
-  const [aiInsight, setAiInsight] = useState('')
+  const totalWeight = Object.values(weights).reduce((a, b) => a + b, 0) || 1;
 
-  // Interactive Climate Health Score Widget state
-  const [scoreWeights, setScoreWeights] = useState({
-    aqi: 0.5,
-    uv: 0.2,
-    temperature: 0.2,
-    humidity: 0.1
-  })
-  const [climateScore, setClimateScore] = useState(0)
+  const w = (k) => weights[k] / totalWeight;
 
-  const canUseLLM = !!import.meta.env.VITE_LLM_API_KEY || !!import.meta.env.VITE_OPENAI_API_KEY
+  // AQI penalty: anything above 100 reduces score progressively.
+  if (typeof aqi === 'number') {
+    if (aqi > 100) base -= (aqi - 100) * 0.35 * w('aqi');
+    else base -= 0 * w('aqi');
+  }
 
-  // Get user's current location on load
-  useEffect(() => {
-    if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          setPosition([pos.coords.latitude, pos.coords.longitude])
-        },
-        (err) => console.log('Geolocation error:', err)
-      )
-    }
-  }, [])
+  // UV penalty: above 5 reduces score
+  if (typeof uvIndex === 'number') {
+    if (uvIndex > 5) base -= (uvIndex - 5) * 1.5 * w('uv');
+  }
 
-  // Fetch data when position changes
-  useEffect(() => {
-    if (position) {
-      fetchData(position[0], position[1])
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [position])
+  // Temperature penalty: above 30 reduces score
+  if (typeof temperature === 'number') {
+    if (temperature > 30) base -= (temperature - 30) * 0.8 * w('temp');
+  }
 
-  // Refetch neighborhood when radius changes (keeps score drill-down responsive)
-  useEffect(() => {
-    if (position && airQualityData) {
-      fetchNeighborhood(position[0], position[1])
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [drillRadiusKm])
+  // Humidity penalty: very low or very high humidity can stress health.
+  if (typeof humidity === 'number') {
+    const dist = Math.min(Math.abs(humidity - 45), Math.abs(humidity - 60));
+    // penalty grows as humidity deviates from mid-range.
+    base -= clamp(dist, 0, 30) * 0.4 * w('humidity');
+  }
 
-  // Recompute score instantly when weights or data changes
-  useEffect(() => {
-    const aqi = airQualityData ? calculateAQI(airQualityData) : 0
-    const score = calculateClimateScoreInteractive({
-      aqi,
-      weather: weatherData,
-      weights: scoreWeights
+  // Wind speed isn't a direct health metric, but low wind can trap pollutants.
+  if (typeof windSpeed === 'number') {
+    if (windSpeed < 10) base -= (10 - windSpeed) * 0.4 * w('wind');
+  }
+
+  return clamp(Math.round(base), 0, 100);
+}
+
+function buildInsightFallback({ aqi, uvIndex, temperature, humidity }) {
+  const label = getAQILabel(aqi);
+  const parts = [];
+
+  if (aqi <= 50) {
+    parts.push(`🌱 Great news! Air quality is ${label} (AQI: ${aqi}). Enjoy your day outside.`);
+  } else if (aqi <= 100) {
+    parts.push(`😊 Air quality is ${label} (AQI: ${aqi}). Generally safe—consider extra care if you’re sensitive.`);
+  } else if (aqi <= 150) {
+    parts.push(`⚠️ Air quality is ${label} (AQI: ${aqi}). Sensitive groups should limit prolonged outdoor exertion.`);
+  } else if (aqi <= 200) {
+    parts.push(`🚨 Air quality is ${label} (AQI: ${aqi}). Avoid intense outdoor workouts today if possible.`);
+  } else {
+    parts.push(`☠️ Warning—air quality is ${label} (AQI: ${aqi}). Stay indoors and keep windows closed.`);
+  }
+
+  if (typeof uvIndex === 'number' && uvIndex > 7) {
+    parts.push(`☀️ UV index is high (${uvIndex}). Use sunscreen and protect your skin.`);
+  }
+
+  if (typeof temperature === 'number' && temperature > 30) {
+    parts.push(`🌡️ Temperature is ${temperature}°C. Hydrate and avoid peak sun hours.`);
+  }
+
+  if (typeof humidity === 'number' && (humidity > 70 || humidity < 30)) {
+    parts.push(`💧 Humidity is ${humidity}%. Consider adjusting your activity and staying comfortable.`);
+  }
+
+  return parts.join(' ');
+}
+
+async function tryGenerateLLMInsight({ prompt, apiKey, endpoint }) {
+  if (!apiKey || !endpoint) return null;
+
+  // Provider-agnostic contract: tries an OpenAI-compatible chat endpoint by default.
+  // You can change endpoint in future without touching UI logic.
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model: 'gpt-3.5-turbo',
+      messages: [
+        { role: 'system', content: 'You are a friendly climate health companion. Keep it empathetic and actionable. 2-4 short sentences.' },
+        { role: 'user', content: prompt }
+      ],
+      temperature: 0.4
     })
-    setClimateScore(score)
-  }, [airQualityData, weatherData, scoreWeights])
+  });
 
-  // Fetch air quality, weather, and timeline data
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`LLM API error: ${res.status} ${text}`);
+  }
+
+  const data = await res.json();
+  // OpenAI-compatible
+  const content = data?.choices?.[0]?.message?.content;
+  return typeof content === 'string' ? content.trim() : null;
+}
+
+function makeNeighOffsets(radiusKm) {
+  // Very small offsets approximated using rough conversions.
+  // 1 degree lat ~ 111 km
+  const dLat = radiusKm / 111;
+  // 1 degree lon depends on latitude later, so we just use a grid and scale lon by cos(lat) when applied.
+  const dLonApprox = radiusKm / 111;
+
+  return [
+    { name: 'Center', dy: 0, dx: 0 },
+    { name: 'North', dy: dLat, dx: 0 },
+    { name: 'South', dy: -dLat, dx: 0 },
+    { name: 'East', dy: 0, dx: dLonApprox },
+    { name: 'West', dy: 0, dx: -dLonApprox },
+    { name: 'NE', dy: dLat / 1.4, dx: dLonApprox / 1.4 },
+    { name: 'NW', dy: dLat / 1.4, dx: -dLonApprox / 1.4 },
+    { name: 'SE', dy: -dLat / 1.4, dx: dLonApprox / 1.4 },
+    { name: 'SW', dy: -dLat / 1.4, dx: -dLonApprox / 1.4 }
+  ];
+}
+
+export default function App() {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [position, setPosition] = useState([20.5937, 78.9629]); // Default: India center
+  const [locationName, setLocationName] = useState('India');
+
+  const [airQualityData, setAirQualityData] = useState(null);
+  const [weatherData, setWeatherData] = useState(null);
+  const [historicalData, setHistoricalData] = useState(null);
+
+  const [loading, setLoading] = useState(false);
+  const [aiInsight, setAiInsight] = useState('');
+
+  // Interactive score
+  const [scoreWeights, setScoreWeights] = useState({
+    aqi: 0.45,
+    uv: 0.2,
+    temp: 0.2,
+    humidity: 0.1,
+    wind: 0.05
+  });
+  const [activeMetrics, setActiveMetrics] = useState({
+    aqi: true,
+    uv: true,
+    temp: true,
+    humidity: true,
+    wind: false
+  });
+
+  const computedWeights = useMemo(() => {
+    const out = { ...scoreWeights };
+    Object.keys(out).forEach((k) => {
+      if (!activeMetrics[k]) out[k] = 0;
+    });
+    return out;
+  }, [scoreWeights, activeMetrics]);
+
+  const aqiNow = useMemo(() => {
+    return airQualityData ? calculateAQI_PM25(airQualityData.pm2_5) : 0;
+  }, [airQualityData]);
+
+  const scoreNow = useMemo(() => {
+    const temperature = weatherData ? weatherData.temperature_2m : undefined;
+    const humidity = weatherData ? weatherData.relative_humidity_2m : undefined;
+    const windSpeed = weatherData ? weatherData.wind_speed_10m : undefined;
+    const uvIndex = weatherData ? weatherData.uv_index : undefined;
+
+    return calculateClimateScoreFromMetrics(
+      {
+        aqi: aqiNow,
+        uvIndex,
+        temperature,
+        humidity,
+        windSpeed
+      },
+      computedWeights
+    );
+  }, [airQualityData, weatherData, aqiNow, computedWeights]);
+
+  // Micro-climate neighborhood drill-down
+  const [neighborhoodRadiusKm, setNeighborhoodRadiusKm] = useState(1);
+  const [neighborhoodStats, setNeighborhoodStats] = useState(null);
+  const [neighborhoodLoading, setNeighborhoodLoading] = useState(false);
+  const neighborhoodAbortRef = useRef(null);
+
+  // Cross-data correlation timeline
+  const [correlationMode, setCorrelationMode] = useState('sync'); // 'sync' | 'aqi'
+
+  // Location init
+  useEffect(() => {
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setPosition([pos.coords.latitude, pos.coords.longitude]);
+      },
+      () => {}
+    );
+  }, []);
+
+  // Fetch data on location changes
+  useEffect(() => {
+    if (!position) return;
+
+    fetchData(position[0], position[1]);
+    fetchNeighborhood(position[0], position[1], neighborhoodRadiusKm);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [position]);
+
+  // Update neighborhood stats on radius change
+  useEffect(() => {
+    if (!position) return;
+    fetchNeighborhood(position[0], position[1], neighborhoodRadiusKm);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [neighborhoodRadiusKm]);
+
   const fetchData = async (lat, lon) => {
-    setLoading(true)
+    setLoading(true);
     try {
-      // Open-Meteo Air Quality API (current)
       const airQualityResponse = await axios.get(
         `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&current=pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone&timezone=auto`
-      )
+      );
 
-      // Open-Meteo Weather API (current)
       const weatherResponse = await axios.get(
         `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,wind_speed_10m,uv_index&timezone=auto`
-      )
+      );
 
-      // Timeline data for cross-data correlation (last 7 days, daily)
-      const [airHistoricalResponse, weatherHistoricalResponse] = await Promise.all([
-        axios.get(
-          `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&start_date=${getDateDaysAgo(7)}&end_date=${getTodayDate()}&daily=pm2_5,pm10,ozone&timezone=auto`
-        ),
-        axios.get(
-          `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=temperature_2m_max,relative_humidity_2m_max,uv_index_max,wind_speed_10m_max&timezone=auto&forecast_days=7`
-        )
-      ])
+      const historicalResponseAQ = await axios.get(
+        `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&start_date=${getDateDaysAgo(7)}&end_date=${getTodayDate()}&daily=pm2_5,pm10,ozone&timezone=auto`
+      );
 
-      setAirQualityData(airQualityResponse.data.current)
-      setWeatherData(weatherResponse.data.current)
-      setHistoricalData({
-        air: airHistoricalResponse.data.daily,
-        weather: weatherHistoricalResponse.data.daily
-      })
+      const historicalResponseWX = await axios.get(
+        `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=temperature_2m_max,relative_humidity_2m_max,uv_index_max,wind_speed_10m_max&timezone=auto`
+      );
 
-      // Neighborhood drill-down
-      fetchNeighborhood(lat, lon)
+      setAirQualityData(airQualityResponse.data.current);
+      setWeatherData(weatherResponse.data.current);
 
-      // Generate AI insight (LLM if configured, else fallback)
-      const aqi = calculateAQI(airQualityResponse.data.current)
-      generateAIInsight(airQualityResponse.data.current, weatherResponse.data.current, aqi)
+      // Build unified timeline for correlation widget
+      const wxDaily = historicalResponseWX.data.daily;
+      const aqDaily = historicalResponseAQ.data.daily;
+
+      const dates = (aqDaily?.time || wxDaily?.time || []).slice(-8);
+
+      const unified = {
+        time: dates,
+        pm2_5: dates.map((t) => (aqDaily?.pm2_5 || []).at(aqDaily?.time?.indexOf(t)) ?? null),
+        pm10: dates.map((t) => (aqDaily?.pm10 || []).at(aqDaily?.time?.indexOf(t)) ?? null),
+        ozone: dates.map((t) => (aqDaily?.ozone || []).at(aqDaily?.time?.indexOf(t)) ?? null),
+        temperature_2m_max: dates.map((t) => (wxDaily?.temperature_2m_max || []).at(wxDaily?.time?.indexOf(t)) ?? null),
+        humidity_2m_max: dates.map((t) => (wxDaily?.relative_humidity_2m_max || []).at(wxDaily?.time?.indexOf(t)) ?? null),
+        uv_index_max: dates.map((t) => (wxDaily?.uv_index_max || []).at(wxDaily?.time?.indexOf(t)) ?? null),
+
+        wind_speed_10m_max: dates.map((t) => (wxDaily?.wind_speed_10m_max || []).at(wxDaily?.time?.indexOf(t)) ?? null)
+      };
+
+      setHistoricalData(unified);
+
+      // AI insight (LLM if available, otherwise fallback)
+      const aqi = calculateAQI_PM25(airQualityResponse.data.current?.pm2_5);
+
+      generateAIInsight({
+        air: airQualityResponse.data.current,
+        weather: weatherResponse.data.current,
+        aqi
+      });
     } catch (error) {
-      console.error('Error fetching data:', error)
+      console.error('Error fetching data:', error);
     } finally {
-      setLoading(false)
+      setLoading(false);
     }
-  }
+  };
 
-  const fetchNeighborhood = async (lat, lon) => {
+  const fetchNeighborhood = async (lat, lon, radiusKm) => {
+    // Local drill-down by sampling nearby points.
+    // We fetch air quality current for multiple offset points and summarize.
+    setNeighborhoodLoading(true);
+
+    if (neighborhoodAbortRef.current) neighborhoodAbortRef.current.abort?.();
+    neighborhoodAbortRef.current = new AbortController();
+    const signal = neighborhoodAbortRef.current.signal;
+
     try {
-      // Rough conversion: 1 deg latitude ~ 111km
-      const kmToLat = drillRadiusKm / 111
-      const kmToLon = drillRadiusKm / (111 * Math.cos((lat * Math.PI) / 180))
+      const offsets = makeNeighOffsets(radiusKm);
+      const cosLat = Math.cos((lat * Math.PI) / 180) || 1;
 
-      // Sample 5 points around the center (micro-climate pockets)
-      const offsets = [
-        { dLat: 0, dLon: 0 },
-        { dLat: kmToLat, dLon: 0 },
-        { dLat: -kmToLat, dLon: 0 },
-        { dLat: 0, dLon: kmToLon },
-        { dLat: 0, dLon: -kmToLon }
-      ]
+      const points = offsets
+        .map((o) => {
+          const sampleLat = lat + o.dy;
+          const sampleLon = lon + o.dx / cosLat;
+          return { name: o.name, lat: sampleLat, lon: sampleLon };
+        })
+        .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon));
 
-      const points = offsets.map((o) => ({
-        lat: lat + o.dLat,
-        lon: lon + o.dLon
-      }))
-
-      const results = await Promise.all(
-        points.map((p) =>
-          axios.get(
-            `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${p.lat}&longitude=${p.lon}&current=pm2_5&timezone=auto`
-          )
+      const promises = points.map((p) =>
+        axios.get(
+          `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${p.lat}&longitude=${p.lon}&current=pm2_5,pm10&timezone=auto`,
+          { signal }
         )
-      )
+      );
 
-      const aqiSamples = results.map((r) => calculateAQI(r.data.current))
-      const aqiMin = Math.min(...aqiSamples)
-      const aqiMax = Math.max(...aqiSamples)
-      const aqiAvg = aqiSamples.reduce((s, v) => s + v, 0) / aqiSamples.length
+      const results = await Promise.allSettled(promises);
+
+      const samples = results
+        .map((r, idx) => {
+          const p = points[idx];
+          if (r.status !== 'fulfilled') return null;
+          const current = r.value.data?.current;
+          const pm25 = current?.pm2_5 ?? null;
+          const aqi = pm25 === null ? null : calculateAQI_PM25(pm25);
+          return {
+            name: p.name,
+            lat: p.lat,
+            lon: p.lon,
+            pm25,
+            aqi,
+            pm10: current?.pm10 ?? null
+          };
+        })
+        .filter(Boolean);
+
+      const validAQI = samples.map((s) => s.aqi).filter((v) => typeof v === 'number');
+      const min = validAQI.length ? Math.min(...validAQI) : 0;
+      const max = validAQI.length ? Math.max(...validAQI) : 0;
+      const avg = validAQI.length ? validAQI.reduce((a, b) => a + b, 0) / validAQI.length : 0;
 
       setNeighborhoodStats({
-        aqiAvg: Math.round(aqiAvg),
-        aqiMin,
-        aqiMax,
-        samples: aqiSamples
-      })
+        radiusKm,
+        samples,
+        minAQI: Math.round(min),
+        maxAQI: Math.round(max),
+        avgAQI: Math.round(avg)
+      });
     } catch (e) {
-      console.error('Neighborhood drill-down error:', e)
+      if (e?.name === 'CanceledError' || e?.name === 'AbortError') return;
+      console.error('Neighborhood error:', e);
+    } finally {
+      setNeighborhoodLoading(false);
     }
-  }
-
+  };
 
   const getDateDaysAgo = (days) => {
-    const date = new Date()
-    date.setDate(date.getDate() - days)
-    return date.toISOString().split('T')[0]
-  }
+    const date = new Date();
+    date.setDate(date.getDate() - days);
+    return date.toISOString().split('T')[0];
+  };
 
   const getTodayDate = () => {
-    return new Date().toISOString().split('T')[0]
-  }
+    return new Date().toISOString().split('T')[0];
+  };
 
-  // Simplified AQI calculation based on PM2.5
-  const calculateAQI = (data) => {
-    const pm25 = data?.pm2_5 || 0
-    if (pm25 <= 12) return Math.round((pm25 / 12) * 50)
-    if (pm25 <= 35.4) return Math.round(((pm25 - 12) / (35.4 - 12)) * 50 + 50)
-    if (pm25 <= 55.4) return Math.round(((pm25 - 35.4) / (55.4 - 35.4)) * 50 + 100)
-    if (pm25 <= 150.4) return Math.round(((pm25 - 55.4) / (150.4 - 55.4)) * 50 + 150)
-    if (pm25 <= 250.4) return Math.round(((pm25 - 150.4) / (250.4 - 150.4)) * 50 + 200)
-    if (pm25 <= 350.4) return Math.round(((pm25 - 250.4) / (350.4 - 250.4)) * 50 + 300)
-    return 400
-  }
+  const generateAIInsight = async ({ air, weather, aqi }) => {
+    const uv = weather?.uv_index;
+    const temp = weather?.temperature_2m;
+    const humidity = weather?.relative_humidity_2m;
 
-  // For interactive scoring: each component produces a 0..1 “risk” then converts to 0..100.
-  const calculateClimateScoreInteractive = ({ aqi, weather, weights }) => {
-    const totalWeight = Object.values(weights).reduce((s, w) => s + w, 0) || 1
+    const fallback = buildInsightFallback({ aqi, uvIndex: uv, temperature: temp, humidity });
 
-    const aqiRisk = Math.min(1, Math.max(0, (aqi - 50) / 200)) // 0 @<=50, 1 @>=250
-    const uv = weather?.uv_index ?? 0
-    const uvRisk = Math.min(1, Math.max(0, (uv - 3) / 8)) // 0 @<=3, 1 @>=11
-    const temp = weather?.temperature_2m ?? 0
-    const tempRisk = Math.min(1, Math.max(0, (temp - 25) / 15)) // 0 @<=25, 1 @>=40
-    const hum = weather?.relative_humidity_2m ?? 0
-    const humidityRisk = Math.min(1, Math.max(0, (hum - 40) / 50)) // 0 @<=40, 1 @>=90
+    // LLM API layer (optional)
+    const apiKey = import.meta.env.VITE_LLM_API_KEY;
+    const endpoint = import.meta.env.VITE_LLM_ENDPOINT;
 
-    const w = {
-      aqi: weights.aqi / totalWeight,
-      uv: weights.uv / totalWeight,
-      temperature: weights.temperature / totalWeight,
-      humidity: weights.humidity / totalWeight
+    // If no key/endpoint, fallback immediately.
+    if (!apiKey || !endpoint) {
+      setAiInsight(fallback);
+      return;
     }
-
-    const risk = aqiRisk * w.aqi + uvRisk * w.uv + tempRisk * w.temperature + humidityRisk * w.humidity
-    const score = 100 * (1 - risk)
-    return Math.max(0, Math.min(100, Math.round(score)))
-  }
-
-  const buildFallbackInsight = (airData, weatherData, aqi) => {
-    const label = getAQILabel(aqi)
-    const insights = []
-
-    if (aqi <= 50) {
-      insights.push(`🌱 Great news! The air quality in your area is excellent (AQI: ${aqi}). It's a perfect day for outdoor activities.`)
-    } else if (aqi <= 100) {
-      insights.push(`😊 The air quality is moderate (AQI: ${aqi}). Generally safe, but sensitive individuals should monitor symptoms.`)
-    } else if (aqi <= 150) {
-      insights.push(`⚠️ Air quality is unhealthy for sensitive groups (AQI: ${aqi}). Consider limiting prolonged outdoor exertion.`)
-    } else if (aqi <= 200) {
-      insights.push(`🚨 The AQI is ${aqi} (${label}). It is advised to avoid outdoor cardio today and wear a mask if going outside.`)
-    } else {
-      insights.push(`☠️ Warning! Air quality is ${label.toLowerCase()} (AQI: ${aqi}). Stay indoors and keep windows closed.`)
-    }
-
-    if ((weatherData?.uv_index ?? 0) > 7) {
-      insights.push(`☀️ UV index is high (${weatherData.uv_index}). Remember to use sunscreen and protective clothing.`)
-    }
-
-    if ((weatherData?.temperature_2m ?? 0) > 30) {
-      insights.push(`🌡️ Temperature is ${weatherData.temperature_2m}°C. Stay hydrated and avoid peak sun hours.`)
-    }
-
-    return insights.join(' ')
-  }
-
-  const generateAIInsight = async (airData, weatherData, aqi) => {
-    // Always set something quickly
-    const fallback = buildFallbackInsight(airData, weatherData, aqi)
-    setAiInsight('Analyzing environmental data with AI...')
 
     try {
-      const llmApiKey = import.meta.env.VITE_LLM_API_KEY || import.meta.env.VITE_OPENAI_API_KEY
-      const llmUrl = import.meta.env.VITE_LLM_API_URL || 'https://api.openai.com/v1/chat/completions'
-      const model = import.meta.env.VITE_LLM_MODEL || 'gpt-4o-mini'
+      setAiInsight('Analyzing with AI Health Companion...');
 
-      if (!llmApiKey) {
-        setAiInsight(fallback)
-        return
-      }
+      const prompt =
+        `Current location AQI (approx from PM2.5): ${aqi}.` +
+        ` PM2.5: ${air?.pm2_5 ?? 'n/a'} µg/m³.` +
+        ` UV index: ${uv ?? 'n/a'}.` +
+        ` Temperature: ${temp ?? 'n/a'}°C.` +
+        ` Humidity: ${humidity ?? 'n/a'}%.` +
+        ` Give an empathetic, human-friendly health summary and 2 actionable suggestions for today.`;
 
-      const neighborhoodLine = neighborhoodStats
-        ? `Neighborhood AQI range (micro-climate): avg ${neighborhoodStats.aqiAvg}, min ${neighborhoodStats.aqiMin}, max ${neighborhoodStats.aqiMax}.`
-        : ''
-
-      const prompt = `You are a friendly “AI Health Companion” for environmental data. Translate the following readings into a short, empathetic, actionable message for a general user (max 90 words). Tone: supportive, not scary. Include: (1) what’s happening, (2) who should be cautious, (3) 1-2 practical recommendations.
-
-${neighborhoodLine}
-Location readings:
-- Air AQI (computed): ${aqi} (${getAQILabel(aqi)})
-- PM2.5: ${airData?.pm2_5 ?? 'n/a'} µg/m³
-- Ozone: ${airData?.ozone ?? 'n/a'} µg/m³
-- Temperature: ${weatherData?.temperature_2m ?? 'n/a'} °C
-- Humidity: ${weatherData?.relative_humidity_2m ?? 'n/a'} %
-- Wind speed: ${weatherData?.wind_speed_10m ?? 'n/a'} km/h
-- UV index: ${weatherData?.uv_index ?? 'n/a'}
-
-Return only the message.`
-
-      const response = await axios.post(
-        llmUrl,
-        {
-          model,
-          messages: [
-            { role: 'system', content: 'You are a helpful health companion for interpreting environmental metrics.' },
-            { role: 'user', content: prompt }
-          ],
-          temperature: 0.4
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${llmApiKey}`,
-            'Content-Type': 'application/json'
-          },
-          timeout: 12000
-        }
-      )
-
-      const msg = response?.data?.choices?.[0]?.message?.content
-      setAiInsight(msg ? String(msg).trim() : fallback)
-    } catch (e) {
-      console.error('LLM insight error:', e)
-      setAiInsight(fallback)
+      const llm = await tryGenerateLLMInsight({ prompt, apiKey, endpoint });
+      setAiInsight(llm || fallback);
+    } catch (err) {
+      console.error('LLM insight failed:', err);
+      setAiInsight(fallback);
     }
-  }
+  };
 
-
-  // Search for location
   const searchLocation = async () => {
-    if (!searchQuery) return
+    if (!searchQuery) return;
     try {
       const response = await axios.get(
         `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchQuery)}&limit=1`
-      )
+      );
       if (response.data && response.data.length > 0) {
-        const { lat, lon, display_name } = response.data[0]
-        setPosition([parseFloat(lat), parseFloat(lon)])
-        setLocationName(display_name)
-        fetchData(parseFloat(lat), parseFloat(lon))
+        const { lat, lon, display_name } = response.data[0];
+        setPosition([parseFloat(lat), parseFloat(lon)]);
+        setLocationName(display_name);
       }
     } catch (error) {
-      console.error('Error searching location:', error)
+      console.error('Error searching location:', error);
     }
-  }
+  };
 
-  // Handle Enter key
   const handleKeyPress = (e) => {
-    if (e.key === 'Enter') {
-      searchLocation()
-    }
-  }
+    if (e.key === 'Enter') searchLocation();
+  };
 
-  // Cross-Data Correlation: chart data for unified timeline
-  const chartLabels = useMemo(() => {
-    const air = historicalData?.air
-    const time = air?.time || []
-    return time.map((date) => new Date(date).toLocaleDateString('en', { month: 'short', day: 'numeric' }))
-  }, [historicalData])
+  const currentAQI = aqiNow;
 
-  const chartDataCorrelation = useMemo(() => {
-    const air = historicalData?.air
-    const weather = historicalData?.weather
+  // Charts
+  const correlationLabels = useMemo(() => {
+    if (!historicalData?.time?.length) return [];
+    return historicalData.time.map((date) =>
+      new Date(date).toLocaleDateString('en', { month: 'short', day: 'numeric' })
+    );
+  }, [historicalData]);
+
+  const corrChartData = useMemo(() => {
+    if (!historicalData) return null;
+
+    const pm25 = historicalData.pm2_5 || [];
+    const temp = historicalData.temperature_2m_max || [];
+    const humidity = historicalData.humidity_2m_max || [];
+    const uv = historicalData.uv_index_max || [];
+
+    const normalize = (arr, invert = false) => {
+      const vals = arr.map((v) => (typeof v === 'number' ? v : null)).filter((v) => v !== null);
+      const min = vals.length ? Math.min(...vals) : 0;
+      const max = vals.length ? Math.max(...vals) : 1;
+      const denom = max - min || 1;
+      return arr.map((v) => {
+        const n = typeof v === 'number' ? v : null;
+        if (n === null) return null;
+        const t = (n - min) / denom;
+        return invert ? 1 - t : t;
+      });
+    };
+
+    // Normalize to compare trends regardless of unit.
+    // Invert UV/Temperature/Humidity so higher (worse) -> higher penalty -> lower normalized health.
+    const aqiProxy = normalize(pm25, true); // higher PM2.5 should look worse
+    const tempProxy = normalize(temp, true);
+    const uvProxy = normalize(uv, true);
+    const humProxy = normalize(humidity, true);
 
     return {
-      labels: chartLabels,
+      labels: correlationLabels,
+      datasets: [
+        {
+          label: 'Air Pollution (PM2.5 health trend)',
+          data: aqiProxy,
+          borderColor: '#3B82F6',
+          backgroundColor: 'rgba(59,130,246,0.12)',
+          tension: 0.35,
+          fill: true,
+          yAxisID: 'y'
+        },
+        {
+          label: 'Temperature (health trend)',
+          data: tempProxy,
+          borderColor: '#F59E0B',
+          backgroundColor: 'rgba(245,158,11,0.12)',
+          tension: 0.35,
+          fill: true,
+          yAxisID: 'y'
+        },
+        {
+          label: 'UV (health trend)',
+          data: uvProxy,
+          borderColor: '#A855F7',
+          backgroundColor: 'rgba(168,85,247,0.12)',
+          tension: 0.35,
+          fill: true,
+          yAxisID: 'y'
+        },
+        {
+          label: 'Humidity (health trend)',
+          data: humProxy,
+          borderColor: '#10B981',
+          backgroundColor: 'rgba(16,185,129,0.12)',
+          tension: 0.35,
+          fill: true,
+          yAxisID: 'y'
+        }
+      ]
+    };
+  }, [historicalData, correlationLabels]);
+
+  const correlationOptions = {
+    responsive: true,
+    plugins: {
+      legend: { position: 'top' },
+      title: { display: true, text: 'Cross-Data Correlation: Weather + Air Quality Sync (normalized)' }
+    },
+    scales: {
+      y: {
+        beginAtZero: true,
+        max: 1,
+        ticks: {
+          callback: function (value) {
+            // Normalize scale label
+            return `${Math.round(value * 100)}%`;
+          }
+        },
+        title: { display: true, text: 'Health Trend (higher = healthier)' }
+      }
+    }
+  };
+
+  const chartDataAQ = useMemo(() => {
+    if (!historicalData) return null;
+    return {
+      labels: correlationLabels,
       datasets: [
         {
           label: 'PM2.5 (µg/m³)',
-          data: air?.pm2_5 || [],
+          data: historicalData.pm2_5 || [],
           borderColor: '#3B82F6',
-          backgroundColor: 'rgba(59, 130, 246, 0.10)',
-          tension: 0.35,
+          backgroundColor: 'rgba(59, 130, 246, 0.1)',
+          tension: 0.4,
           fill: true
         },
         {
           label: 'PM10 (µg/m³)',
-          data: air?.pm10 || [],
+          data: historicalData.pm10 || [],
           borderColor: '#10B981',
-          backgroundColor: 'rgba(16, 185, 129, 0.10)',
-          tension: 0.35,
+          backgroundColor: 'rgba(16, 185, 129, 0.1)',
+          tension: 0.4,
           fill: true
-        },
-        {
-          label: 'Temp max (°C)',
-          data: weather?.temperature_2m_max || [],
-          borderColor: '#F59E0B',
-          backgroundColor: 'rgba(245, 158, 11, 0.10)',
-          tension: 0.35,
-          fill: false
-        },
-        {
-          label: 'UV max',
-          data: weather?.uv_index_max || [],
-          borderColor: '#A855F7',
-          backgroundColor: 'rgba(168, 85, 247, 0.10)',
-          tension: 0.35,
-          fill: false
         }
       ]
-    }
-  }, [historicalData, chartLabels])
+    };
+  }, [historicalData, correlationLabels]);
 
-  const chartOptionsCorrelation = useMemo(() => {
-    return {
-      responsive: true,
-      plugins: {
-        legend: { position: 'top' },
-        title: {
-          display: true,
-          text: 'Cross-Data Correlation (Air Quality + Weather)'
-        }
-      },
-      interaction: { mode: 'index', intersect: false },
-      scales: {
-        y: {
-          beginAtZero: true,
-          title: {
-            display: true,
-            text: 'Values (mixed units)'
-          }
-        }
+  const chartOptionsAQ = {
+    responsive: true,
+    plugins: {
+      legend: { position: 'top' },
+      title: { display: true, text: '7-Day Air Quality Trends' }
+    },
+    scales: {
+      y: {
+        beginAtZero: true,
+        title: { display: true, text: 'Concentration (µg/m³)' }
       }
     }
-  }, [])
+  };
 
+  const scoreColor = scoreNow >= 70 ? '#10B981' : scoreNow >= 40 ? '#F59E0B' : '#EF4444';
 
-  // Get current AQI for marker
-  const currentAQI = airQualityData ? calculateAQI(airQualityData) : 0
+  // Build neighborhood markers for display
+  const neighborhoodMarkers = useMemo(() => {
+    if (!position || !neighborhoodStats?.samples?.length) return [];
+    return neighborhoodStats.samples
+      .filter((s) => typeof s.aqi === 'number')
+      .map((s, idx) => ({
+        id: `${s.name}-${idx}`,
+        lat: s.lat,
+        lon: s.lon,
+        aqi: s.aqi,
+        name: s.name
+      }));
+  }, [position, neighborhoodStats]);
+
+  const currentMarkerIcon = useMemo(() => {
+    return L.divIcon({
+      className: 'aqi-marker',
+      html: `<div class="w-8 h-8 rounded-full border-2 border-white shadow-lg" style="background-color: ${getAQIColor(currentAQI)}"></div>`,
+      iconSize: [32, 32],
+      iconAnchor: [16, 32]
+    });
+  }, [currentAQI]);
 
   return (
     <div className="flex h-screen bg-gradient-to-br from-gray-50 to-gray-100">
-      {/* Sidebar */}
+      {/* Sidebar (Dashboard-like) */}
       <div className="w-80 bg-white shadow-xl p-6 overflow-y-auto">
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-gray-800 mb-2">🌍 GeoSustain</h1>
@@ -480,9 +673,53 @@ Return only the message.`
           </div>
         </div>
 
-        {/* Climate Health Score (interactive widget) */}
+        {/* Micro-Climate Neighborhood Drill-down */}
+        <div className="mb-6 bg-gradient-to-r from-emerald-50 to-blue-50 rounded-xl p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-lg font-semibold text-gray-700">Micro-Climate Drill-down</h2>
+            <span className="text-xs text-gray-600">{neighborhoodRadiusKm}km</span>
+          </div>
+
+          <div className="mb-3">
+            <label className="block text-xs font-medium text-gray-700 mb-2">Radius</label>
+            <input
+              type="range"
+              min={0.5}
+              max={3}
+              step={0.5}
+              value={neighborhoodRadiusKm}
+              onChange={(e) => setNeighborhoodRadiusKm(parseFloat(e.target.value))}
+              className="w-full"
+            />
+            <div className="flex justify-between text-[11px] text-gray-600 mt-1">
+              <span>0.5</span>
+              <span>3</span>
+            </div>
+          </div>
+
+          {neighborhoodLoading ? (
+            <p className="text-sm text-gray-700">Sampling neighborhood pockets...</p>
+          ) : neighborhoodStats ? (
+            <div className="space-y-2">
+              <p className="text-sm text-gray-700">
+                <span className="font-semibold">Avg AQI</span>: {neighborhoodStats.avgAQI} ({getAQILabel(neighborhoodStats.avgAQI)})
+              </p>
+              <p className="text-sm text-gray-700">
+                <span className="font-semibold">Spread</span>: {neighborhoodStats.minAQI} → {neighborhoodStats.maxAQI}
+              </p>
+              <p className="text-xs text-gray-600">Shows local variation by sampling nearby coordinates.</p>
+            </div>
+          ) : (
+            <p className="text-sm text-gray-700">Select a radius to see local AQI variation.</p>
+          )}
+        </div>
+
+        {/* Interactive Climate Health Score Widget */}
         <div className="mb-6 bg-gradient-to-r from-blue-50 to-green-50 rounded-xl p-4">
-          <h2 className="text-lg font-semibold text-gray-700 mb-3">Interactive Climate Health Score</h2>
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="text-lg font-semibold text-gray-700">Climate Health Score</h2>
+            <span className="text-xs text-gray-600">/100</span>
+          </div>
 
           <div className="relative w-full h-32 mb-4">
             <svg className="w-full h-full" viewBox="0 0 100 50">
@@ -495,113 +732,132 @@ Return only the message.`
               <path
                 d="M 10 40 A 30 30 0 0 1 90 40"
                 fill="none"
-                stroke={climateScore >= 70 ? '#10B981' : climateScore >= 40 ? '#F59E0B' : '#EF4444'}
+                stroke={scoreColor}
                 strokeWidth="8"
                 strokeDasharray="188"
-                strokeDashoffset={188 - (188 * climateScore) / 100}
-                className="transition-all duration-500"
+                strokeDashoffset={188 - (188 * scoreNow) / 100}
+                className="transition-all duration-700"
               />
-              <text x="50" y="30" textAnchor="middle" className="text-2xl font-bold fill-gray-800">{climateScore}</text>
-              <text x="50" y="45" textAnchor="middle" className="text-sm fill-gray-600">/100</text>
+              <text x="50" y="30" textAnchor="middle" className="text-2xl font-bold fill-gray-800">
+                {scoreNow}
+              </text>
+              <text x="50" y="45" textAnchor="middle" className="text-sm fill-gray-600">
+                /100
+              </text>
             </svg>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            {/* Weight sliders drive immediate score updates */}
-            <div className="bg-white/60 rounded-lg p-3">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-xs text-gray-600">AQI</span>
-                <span className="text-xs font-semibold text-gray-800">{Math.round(scoreWeights.aqi * 100)}%</span>
-              </div>
+          <div className="space-y-3">
+            <div>
+              <label className="flex items-center justify-between text-xs text-gray-700">
+                <span>Include AQI</span>
+                <input
+                  type="checkbox"
+                  checked={activeMetrics.aqi}
+                  onChange={(e) => setActiveMetrics((s) => ({ ...s, aqi: e.target.checked }))}
+                />
+              </label>
               <input
                 type="range"
-                min="0"
-                max="100"
-                step="5"
-                value={Math.round(scoreWeights.aqi * 100)}
-                onChange={(e) => setScoreWeights((w) => ({ ...w, aqi: Number(e.target.value) / 100 }))}
+                min={0}
+                max={1}
+                step={0.01}
+                value={scoreWeights.aqi}
+                onChange={(e) => setScoreWeights((s) => ({ ...s, aqi: parseFloat(e.target.value) }))}
                 className="w-full"
+                disabled={!activeMetrics.aqi}
               />
             </div>
 
-            <div className="bg-white/60 rounded-lg p-3">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-xs text-gray-600">UV</span>
-                <span className="text-xs font-semibold text-gray-800">{Math.round(scoreWeights.uv * 100)}%</span>
-              </div>
+            <div>
+              <label className="flex items-center justify-between text-xs text-gray-700">
+                <span>Include UV</span>
+                <input
+                  type="checkbox"
+                  checked={activeMetrics.uv}
+                  onChange={(e) => setActiveMetrics((s) => ({ ...s, uv: e.target.checked }))}
+                />
+              </label>
               <input
                 type="range"
-                min="0"
-                max="100"
-                step="5"
-                value={Math.round(scoreWeights.uv * 100)}
-                onChange={(e) => setScoreWeights((w) => ({ ...w, uv: Number(e.target.value) / 100 }))}
+                min={0}
+                max={1}
+                step={0.01}
+                value={scoreWeights.uv}
+                onChange={(e) => setScoreWeights((s) => ({ ...s, uv: parseFloat(e.target.value) }))}
                 className="w-full"
+                disabled={!activeMetrics.uv}
               />
             </div>
 
-            <div className="bg-white/60 rounded-lg p-3">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-xs text-gray-600">Temp</span>
-                <span className="text-xs font-semibold text-gray-800">{Math.round(scoreWeights.temperature * 100)}%</span>
-              </div>
+            <div>
+              <label className="flex items-center justify-between text-xs text-gray-700">
+                <span>Include Temperature</span>
+                <input
+                  type="checkbox"
+                  checked={activeMetrics.temp}
+                  onChange={(e) => setActiveMetrics((s) => ({ ...s, temp: e.target.checked }))}
+                />
+              </label>
               <input
                 type="range"
-                min="0"
-                max="100"
-                step="5"
-                value={Math.round(scoreWeights.temperature * 100)}
-                onChange={(e) => setScoreWeights((w) => ({ ...w, temperature: Number(e.target.value) / 100 }))}
+                min={0}
+                max={1}
+                step={0.01}
+                value={scoreWeights.temp}
+                onChange={(e) => setScoreWeights((s) => ({ ...s, temp: parseFloat(e.target.value) }))}
                 className="w-full"
+                disabled={!activeMetrics.temp}
               />
             </div>
 
-            <div className="bg-white/60 rounded-lg p-3">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-xs text-gray-600">Humidity</span>
-                <span className="text-xs font-semibold text-gray-800">{Math.round(scoreWeights.humidity * 100)}%</span>
-              </div>
+            <div>
+              <label className="flex items-center justify-between text-xs text-gray-700">
+                <span>Include Humidity</span>
+                <input
+                  type="checkbox"
+                  checked={activeMetrics.humidity}
+                  onChange={(e) => setActiveMetrics((s) => ({ ...s, humidity: e.target.checked }))}
+                />
+              </label>
               <input
                 type="range"
-                min="0"
-                max="100"
-                step="5"
-                value={Math.round(scoreWeights.humidity * 100)}
-                onChange={(e) => setScoreWeights((w) => ({ ...w, humidity: Number(e.target.value) / 100 }))}
+                min={0}
+                max={1}
+                step={0.01}
+                value={scoreWeights.humidity}
+                onChange={(e) => setScoreWeights((s) => ({ ...s, humidity: parseFloat(e.target.value) }))}
                 className="w-full"
+                disabled={!activeMetrics.humidity}
+              />
+            </div>
+
+            <div>
+              <label className="flex items-center justify-between text-xs text-gray-700">
+                <span>Include Wind (optional)</span>
+                <input
+                  type="checkbox"
+                  checked={activeMetrics.wind}
+                  onChange={(e) => setActiveMetrics((s) => ({ ...s, wind: e.target.checked }))}
+                />
+              </label>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={scoreWeights.wind}
+                onChange={(e) => setScoreWeights((s) => ({ ...s, wind: parseFloat(e.target.value) }))}
+                className="w-full"
+                disabled={!activeMetrics.wind}
               />
             </div>
           </div>
 
-          {/* Neighborhood stats for the drill-down */}
-          <div className="mt-4">
-            <h3 className="text-sm font-semibold text-gray-700 mb-2">Micro-Climate Neighborhood Drill-down</h3>
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs text-gray-600">Radius</span>
-              <span className="text-xs font-semibold text-gray-800">{drillRadiusKm} km</span>
-            </div>
-            <input
-              type="range"
-              min="0.5"
-              max="3"
-              step="0.5"
-              value={drillRadiusKm}
-              onChange={(e) => setDrillRadiusKm(Number(e.target.value))}
-              className="w-full"
-            />
-
-            {neighborhoodStats && (
-              <div className="mt-3 bg-white/60 rounded-lg p-3">
-                <div className="text-xs text-gray-600">Neighborhood AQI snapshot (sampled)</div>
-                <div className="text-sm font-semibold text-gray-800">Avg: {neighborhoodStats.aqiAvg}</div>
-                <div className="text-xs text-gray-600">Min/Max: {neighborhoodStats.aqiMin} / {neighborhoodStats.aqiMax}</div>
-                <div className="text-[11px] text-gray-500 mt-1">Shows local pockets—industrial vs park-like micro-conditions.</div>
-              </div>
-            )}
+          <div className="mt-3 text-xs text-gray-600">
+            Updates instantly when you toggle metrics—no new API calls.
           </div>
-
         </div>
-
 
         {/* Current Air Quality */}
         {airQualityData && (
@@ -624,6 +880,10 @@ Return only the message.`
                 <p className="text-xs text-gray-500">NO₂</p>
                 <p className="text-lg font-bold">{airQualityData.nitrogen_dioxide} µg/m³</p>
               </div>
+            </div>
+
+            <div className="mt-3 text-sm text-gray-700">
+              <span className="font-semibold">AQI:</span> {currentAQI} ({getAQILabel(currentAQI)})
             </div>
           </div>
         )}
@@ -653,17 +913,21 @@ Return only the message.`
           </div>
         )}
 
-        {/* AI Health Companion */}
+        {/* Conversational AI Data Translator */}
         <div className="mb-6">
           <h2 className="text-lg font-semibold text-gray-700 mb-3">🤖 AI Health Companion</h2>
           <div className="bg-gradient-to-r from-purple-50 to-pink-50 p-4 rounded-lg">
             <p className="text-sm text-gray-700 leading-relaxed">
-              {loading ? 'Analyzing environmental data...' : aiInsight || 'Search for a location to get personalized insights!'}
+              {loading ? 'Analyzing environmental data...' : aiInsight || 'Search for a location to get an empathetic health summary!'}
             </p>
+            <div className="text-[11px] text-gray-600 mt-2">
+              {import.meta.env.VITE_LLM_API_KEY && import.meta.env.VITE_LLM_ENDPOINT
+                ? 'Using LLM translator (if reachable); falls back gracefully.'
+                : 'LLM translator not configured—using local empathetic summary.'}
+            </div>
           </div>
         </div>
 
-        {/* Location Info */}
         <div className="text-xs text-gray-500">
           <p>📍 {locationName}</p>
           <p className="mt-1">Data from Open-Meteo APIs</p>
@@ -681,26 +945,31 @@ Return only the message.`
             />
             <MapController position={position} />
 
-            {/* Micro-climate radius overlay */}
-            <Circle
-              center={position}
-              radius={drillRadiusKm * 1000}
-              pathOptions={{
-                color: '#2563EB',
-                weight: 2,
-                fillColor: '#60A5FA',
-                fillOpacity: 0.12
-              }}
-            />
+            {/* Neighborhood overlay markers */}
+            {neighborhoodMarkers.map((m) => (
+              <Marker
+                key={m.id}
+                position={[m.lat, m.lon]}
+                icon={
+                  L.divIcon({
+                    className: 'aqi-marker',
+                    html: `<div class="w-5 h-5 rounded-full border-2 border-white shadow" style="background-color: ${getAQIColor(m.aqi)}"></div>`,
+                    iconSize: [20, 20],
+                    iconAnchor: [10, 10]
+                  })
+                }
+              >
+                <Popup>
+                  <div className="text-center">
+                    <strong>{m.name}</strong>
+                    <br />
+                    AQI: {m.aqi} ({getAQILabel(m.aqi)})
+                  </div>
+                </Popup>
+              </Marker>
+            ))}
 
-            <Marker position={position} 
-              icon={L.divIcon({
-                className: 'aqi-marker',
-                html: `<div class="w-8 h-8 rounded-full border-2 border-white shadow-lg" style="background-color: ${getAQIColor(currentAQI)}"></div>`,
-                iconSize: [32, 32],
-                iconAnchor: [16, 32]
-              })}
-            >
+            <Marker position={position} icon={currentMarkerIcon}>
               <Popup>
                 <div className="text-center">
                   <strong>{locationName}</strong>
@@ -711,8 +980,6 @@ Return only the message.`
             </Marker>
           </MapContainer>
 
-          
-          {/* Loading overlay */}
           {loading && (
             <div className="absolute inset-0 bg-black bg-opacity-20 flex items-center justify-center z-[1000]">
               <div className="bg-white p-6 rounded-lg shadow-lg">
@@ -723,20 +990,49 @@ Return only the message.`
           )}
         </div>
 
-        {/* Cross-Data Correlation: Air Quality + Weather sync timeline */}
-        {historicalData && (
-          <div className="h-[28rem] bg-white p-4 border-t">
-            <Line options={chartOptionsCorrelation} data={chartDataCorrelation} />
-            <div className="mt-2 text-xs text-gray-500">
-              Unified timeline: PM2.5/PM10 overlaid with temperature & UV. This helps explain “why” conditions shift.
+        {/* Charts */}
+        <div className="border-t bg-white">
+          <div className="p-4 flex items-center justify-between gap-3">
+            <div>
+              <h3 className="text-lg font-semibold text-gray-800">Analytics Dashboard</h3>
+              <p className="text-xs text-gray-600">Switch views for correlation vs. raw AQ trends.</p>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setCorrelationMode('sync')}
+                className={
+                  correlationMode === 'sync'
+                    ? 'px-3 py-1.5 rounded-lg bg-blue-600 text-white text-sm'
+                    : 'px-3 py-1.5 rounded-lg bg-gray-100 text-gray-700 text-sm hover:bg-gray-200'
+                }
+              >
+                Sync Correlation
+              </button>
+              <button
+                onClick={() => setCorrelationMode('aqi')}
+                className={
+                  correlationMode === 'aqi'
+                    ? 'px-3 py-1.5 rounded-lg bg-blue-600 text-white text-sm'
+                    : 'px-3 py-1.5 rounded-lg bg-gray-100 text-gray-700 text-sm hover:bg-gray-200'
+                }
+              >
+                AQ Trend
+              </button>
             </div>
           </div>
-        )}
 
-
+          {historicalData && (
+            <div className="h-72 px-4 pb-4">
+              {correlationMode === 'sync' ? (
+                corrChartData && <Line options={correlationOptions} data={corrChartData} />
+              ) : (
+                chartDataAQ && <Line options={chartOptionsAQ} data={chartDataAQ} />
+              )}
+            </div>
+          )}
+        </div>
       </div>
     </div>
-  )
+  );
 }
 
-export default App
