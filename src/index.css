@@ -1,0 +1,52 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom styles for Leaflet */
+.leaflet-container {
+  height: 100%;
+  width: 100%;
+}
+
+/* AQI color classes */
+.aqi-good {
+  background-color: #00E400;
+}
+
+.aqi-moderate {
+  background-color: #FFFF00;
+}
+
+.aqi-sens {
+  background-color: #FF7E00;
+}
+
+.aqi-unhealthy {
+  background-color: #FF0000;
+}
+
+.aqi-very-unhealthy {
+  background-color: #8F3F97;
+}
+
+.aqi-hazardous {
+  background-color: #7E0023;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #888;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
