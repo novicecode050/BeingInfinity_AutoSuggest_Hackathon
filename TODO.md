@@ -4,8 +4,9 @@
 - [x] Implement Cross-Data Correlation timeline chart overlay (weather + air quality on shared time axis)
 - [x] Implement Interactive Climate Health Score widget with metric toggles/weights (score updates immediately)
 - [x] Update README.md with LLM API env var instructions
-- [ ] Run app (npm run dev) and verify all UI requirements render and score changes correctly
-- [ ] git add/commit with proper message and push
+- [x] Run app (npm run dev) and verify all UI requirements render and score changes correctly
+- [x] git add/commit with proper message and push
+
 
 
 
