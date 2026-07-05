@@ -47,14 +47,17 @@ npm run dev
 
 ### Environment Variables
 
-Create a `.env` file in the root directory (optional for enhanced features):
+Create a `.env` file in the project root (optional for the AI Health Companion):
 
 ```env
-VITE_GEMINI_API_KEY=your_gemini_api_key_here
-VITE_WAQI_API_KEY=your_waqi_api_key_here
+# OpenAI-compatible Chat Completions
+VITE_LLM_API_URL=https://api.openai.com/v1/chat/completions
+VITE_OPENAI_API_KEY=your_key_here
+VITE_LLM_MODEL=gpt-4o-mini
 ```
 
-> Note: The app works with free APIs (Open-Meteo) without requiring API keys.
+> Note: If the LLM API key is missing, GeoSustain automatically falls back to the built-in rule-based insights. Open-Meteo + Nominatim work without keys.
+
 
 ## 📊 End Users
 

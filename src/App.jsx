@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react'
-import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet'
+import React, { useEffect, useMemo, useState } from 'react'
+import { MapContainer, TileLayer, Marker, Popup, Circle, useMap } from 'react-leaflet'
 import { Line } from 'react-chartjs-2'
 import {
   Chart as ChartJS,
@@ -26,6 +26,7 @@ ChartJS.register(
   Legend,
   Filler
 )
+
 
 // AQI color function
 const getAQIColor = (aqi) => {
@@ -61,12 +62,29 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('')
   const [position, setPosition] = useState([20.5937, 78.9629]) // Default: India center
   const [locationName, setLocationName] = useState('India')
+
+  // Current point data
   const [airQualityData, setAirQualityData] = useState(null)
   const [weatherData, setWeatherData] = useState(null)
   const [historicalData, setHistoricalData] = useState(null)
+
+  // Neighborhood drill-down
+  const [drillRadiusKm, setDrillRadiusKm] = useState(1)
+  const [neighborhoodStats, setNeighborhoodStats] = useState(null) // { aqiAvg, aqiMin, aqiMax, samples: [...] }
+
   const [loading, setLoading] = useState(false)
   const [aiInsight, setAiInsight] = useState('')
+
+  // Interactive Climate Health Score Widget state
+  const [scoreWeights, setScoreWeights] = useState({
+    aqi: 0.5,
+    uv: 0.2,
+    temperature: 0.2,
+    humidity: 0.1
+  })
   const [climateScore, setClimateScore] = useState(0)
+
+  const canUseLLM = !!import.meta.env.VITE_LLM_API_KEY || !!import.meta.env.VITE_OPENAI_API_KEY
 
   // Get user's current location on load
   useEffect(() => {
@@ -85,36 +103,64 @@ function App() {
     if (position) {
       fetchData(position[0], position[1])
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [position])
 
-  // Fetch air quality and weather data
+  // Refetch neighborhood when radius changes (keeps score drill-down responsive)
+  useEffect(() => {
+    if (position && airQualityData) {
+      fetchNeighborhood(position[0], position[1])
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drillRadiusKm])
+
+  // Recompute score instantly when weights or data changes
+  useEffect(() => {
+    const aqi = airQualityData ? calculateAQI(airQualityData) : 0
+    const score = calculateClimateScoreInteractive({
+      aqi,
+      weather: weatherData,
+      weights: scoreWeights
+    })
+    setClimateScore(score)
+  }, [airQualityData, weatherData, scoreWeights])
+
+  // Fetch air quality, weather, and timeline data
   const fetchData = async (lat, lon) => {
     setLoading(true)
     try {
-      // Open-Meteo Air Quality API
+      // Open-Meteo Air Quality API (current)
       const airQualityResponse = await axios.get(
         `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&current=pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone&timezone=auto`
       )
-      
-      // Open-Meteo Weather API
+
+      // Open-Meteo Weather API (current)
       const weatherResponse = await axios.get(
         `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,wind_speed_10m,uv_index&timezone=auto`
       )
 
-      // Historical data for 7-day trends
-      const historicalResponse = await axios.get(
-        `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&start_date=${getDateDaysAgo(7)}&end_date=${getTodayDate()}&daily=pm2_5,pm10,ozone,temperature_2m_max&timezone=auto`
-      )
+      // Timeline data for cross-data correlation (last 7 days, daily)
+      const [airHistoricalResponse, weatherHistoricalResponse] = await Promise.all([
+        axios.get(
+          `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&start_date=${getDateDaysAgo(7)}&end_date=${getTodayDate()}&daily=pm2_5,pm10,ozone&timezone=auto`
+        ),
+        axios.get(
+          `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=temperature_2m_max,relative_humidity_2m_max,uv_index_max,wind_speed_10m_max&timezone=auto&forecast_days=7`
+        )
+      ])
 
       setAirQualityData(airQualityResponse.data.current)
       setWeatherData(weatherResponse.data.current)
-      setHistoricalData(historicalResponse.data.daily)
-      
-      // Calculate climate health score
+      setHistoricalData({
+        air: airHistoricalResponse.data.daily,
+        weather: weatherHistoricalResponse.data.daily
+      })
+
+      // Neighborhood drill-down
+      fetchNeighborhood(lat, lon)
+
+      // Generate AI insight (LLM if configured, else fallback)
       const aqi = calculateAQI(airQualityResponse.data.current)
-      setClimateScore(calculateClimateScore(aqi, weatherResponse.data.current))
-      
-      // Generate AI insight
       generateAIInsight(airQualityResponse.data.current, weatherResponse.data.current, aqi)
     } catch (error) {
       console.error('Error fetching data:', error)
@@ -122,6 +168,51 @@ function App() {
       setLoading(false)
     }
   }
+
+  const fetchNeighborhood = async (lat, lon) => {
+    try {
+      // Rough conversion: 1 deg latitude ~ 111km
+      const kmToLat = drillRadiusKm / 111
+      const kmToLon = drillRadiusKm / (111 * Math.cos((lat * Math.PI) / 180))
+
+      // Sample 5 points around the center (micro-climate pockets)
+      const offsets = [
+        { dLat: 0, dLon: 0 },
+        { dLat: kmToLat, dLon: 0 },
+        { dLat: -kmToLat, dLon: 0 },
+        { dLat: 0, dLon: kmToLon },
+        { dLat: 0, dLon: -kmToLon }
+      ]
+
+      const points = offsets.map((o) => ({
+        lat: lat + o.dLat,
+        lon: lon + o.dLon
+      }))
+
+      const results = await Promise.all(
+        points.map((p) =>
+          axios.get(
+            `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${p.lat}&longitude=${p.lon}&current=pm2_5&timezone=auto`
+          )
+        )
+      )
+
+      const aqiSamples = results.map((r) => calculateAQI(r.data.current))
+      const aqiMin = Math.min(...aqiSamples)
+      const aqiMax = Math.max(...aqiSamples)
+      const aqiAvg = aqiSamples.reduce((s, v) => s + v, 0) / aqiSamples.length
+
+      setNeighborhoodStats({
+        aqiAvg: Math.round(aqiAvg),
+        aqiMin,
+        aqiMax,
+        samples: aqiSamples
+      })
+    } catch (e) {
+      console.error('Neighborhood drill-down error:', e)
+    }
+  }
+
 
   const getDateDaysAgo = (days) => {
     const date = new Date()
@@ -135,7 +226,7 @@ function App() {
 
   // Simplified AQI calculation based on PM2.5
   const calculateAQI = (data) => {
-    const pm25 = data.pm2_5 || 0
+    const pm25 = data?.pm2_5 || 0
     if (pm25 <= 12) return Math.round((pm25 / 12) * 50)
     if (pm25 <= 35.4) return Math.round(((pm25 - 12) / (35.4 - 12)) * 50 + 50)
     if (pm25 <= 55.4) return Math.round(((pm25 - 35.4) / (55.4 - 35.4)) * 50 + 100)
@@ -145,18 +236,34 @@ function App() {
     return 400
   }
 
-  const calculateClimateScore = (aqi, weather) => {
-    let score = 100
-    if (aqi > 100) score -= (aqi - 100) * 0.5
-    if (weather?.uv_index > 5) score -= (weather.uv_index - 5) * 2
-    if (weather?.temperature_2m > 35) score -= (weather.temperature_2m - 35) * 1
+  // For interactive scoring: each component produces a 0..1 “risk” then converts to 0..100.
+  const calculateClimateScoreInteractive = ({ aqi, weather, weights }) => {
+    const totalWeight = Object.values(weights).reduce((s, w) => s + w, 0) || 1
+
+    const aqiRisk = Math.min(1, Math.max(0, (aqi - 50) / 200)) // 0 @<=50, 1 @>=250
+    const uv = weather?.uv_index ?? 0
+    const uvRisk = Math.min(1, Math.max(0, (uv - 3) / 8)) // 0 @<=3, 1 @>=11
+    const temp = weather?.temperature_2m ?? 0
+    const tempRisk = Math.min(1, Math.max(0, (temp - 25) / 15)) // 0 @<=25, 1 @>=40
+    const hum = weather?.relative_humidity_2m ?? 0
+    const humidityRisk = Math.min(1, Math.max(0, (hum - 40) / 50)) // 0 @<=40, 1 @>=90
+
+    const w = {
+      aqi: weights.aqi / totalWeight,
+      uv: weights.uv / totalWeight,
+      temperature: weights.temperature / totalWeight,
+      humidity: weights.humidity / totalWeight
+    }
+
+    const risk = aqiRisk * w.aqi + uvRisk * w.uv + tempRisk * w.temperature + humidityRisk * w.humidity
+    const score = 100 * (1 - risk)
     return Math.max(0, Math.min(100, Math.round(score)))
   }
 
-  const generateAIInsight = (airData, weatherData, aqi) => {
+  const buildFallbackInsight = (airData, weatherData, aqi) => {
     const label = getAQILabel(aqi)
     const insights = []
-    
+
     if (aqi <= 50) {
       insights.push(`🌱 Great news! The air quality in your area is excellent (AQI: ${aqi}). It's a perfect day for outdoor activities.`)
     } else if (aqi <= 100) {
@@ -169,16 +276,77 @@ function App() {
       insights.push(`☠️ Warning! Air quality is ${label.toLowerCase()} (AQI: ${aqi}). Stay indoors and keep windows closed.`)
     }
 
-    if (weatherData?.uv_index > 7) {
+    if ((weatherData?.uv_index ?? 0) > 7) {
       insights.push(`☀️ UV index is high (${weatherData.uv_index}). Remember to use sunscreen and protective clothing.`)
     }
 
-    if (weatherData?.temperature_2m > 30) {
+    if ((weatherData?.temperature_2m ?? 0) > 30) {
       insights.push(`🌡️ Temperature is ${weatherData.temperature_2m}°C. Stay hydrated and avoid peak sun hours.`)
     }
 
-    setAiInsight(insights.join(' '))
+    return insights.join(' ')
   }
+
+  const generateAIInsight = async (airData, weatherData, aqi) => {
+    // Always set something quickly
+    const fallback = buildFallbackInsight(airData, weatherData, aqi)
+    setAiInsight('Analyzing environmental data with AI...')
+
+    try {
+      const llmApiKey = import.meta.env.VITE_LLM_API_KEY || import.meta.env.VITE_OPENAI_API_KEY
+      const llmUrl = import.meta.env.VITE_LLM_API_URL || 'https://api.openai.com/v1/chat/completions'
+      const model = import.meta.env.VITE_LLM_MODEL || 'gpt-4o-mini'
+
+      if (!llmApiKey) {
+        setAiInsight(fallback)
+        return
+      }
+
+      const neighborhoodLine = neighborhoodStats
+        ? `Neighborhood AQI range (micro-climate): avg ${neighborhoodStats.aqiAvg}, min ${neighborhoodStats.aqiMin}, max ${neighborhoodStats.aqiMax}.`
+        : ''
+
+      const prompt = `You are a friendly “AI Health Companion” for environmental data. Translate the following readings into a short, empathetic, actionable message for a general user (max 90 words). Tone: supportive, not scary. Include: (1) what’s happening, (2) who should be cautious, (3) 1-2 practical recommendations.
+
+${neighborhoodLine}
+Location readings:
+- Air AQI (computed): ${aqi} (${getAQILabel(aqi)})
+- PM2.5: ${airData?.pm2_5 ?? 'n/a'} µg/m³
+- Ozone: ${airData?.ozone ?? 'n/a'} µg/m³
+- Temperature: ${weatherData?.temperature_2m ?? 'n/a'} °C
+- Humidity: ${weatherData?.relative_humidity_2m ?? 'n/a'} %
+- Wind speed: ${weatherData?.wind_speed_10m ?? 'n/a'} km/h
+- UV index: ${weatherData?.uv_index ?? 'n/a'}
+
+Return only the message.`
+
+      const response = await axios.post(
+        llmUrl,
+        {
+          model,
+          messages: [
+            { role: 'system', content: 'You are a helpful health companion for interpreting environmental metrics.' },
+            { role: 'user', content: prompt }
+          ],
+          temperature: 0.4
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${llmApiKey}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 12000
+        }
+      )
+
+      const msg = response?.data?.choices?.[0]?.message?.content
+      setAiInsight(msg ? String(msg).trim() : fallback)
+    } catch (e) {
+      console.error('LLM insight error:', e)
+      setAiInsight(fallback)
+    }
+  }
+
 
   // Search for location
   const searchLocation = async () => {
@@ -205,50 +373,79 @@ function App() {
     }
   }
 
-  // Chart data for 7-day trends
-  const chartData = {
-    labels: historicalData?.time?.map(date => new Date(date).toLocaleDateString('en', { month: 'short', day: 'numeric' })) || [],
-    datasets: [
-      {
-        label: 'PM2.5 (µg/m³)',
-        data: historicalData?.pm2_5 || [],
-        borderColor: '#3B82F6',
-        backgroundColor: 'rgba(59, 130, 246, 0.1)',
-        tension: 0.4,
-        fill: true
-      },
-      {
-        label: 'PM10 (µg/m³)',
-        data: historicalData?.pm10 || [],
-        borderColor: '#10B981',
-        backgroundColor: 'rgba(16, 185, 129, 0.1)',
-        tension: 0.4,
-        fill: true
-      }
-    ]
-  }
+  // Cross-Data Correlation: chart data for unified timeline
+  const chartLabels = useMemo(() => {
+    const air = historicalData?.air
+    const time = air?.time || []
+    return time.map((date) => new Date(date).toLocaleDateString('en', { month: 'short', day: 'numeric' }))
+  }, [historicalData])
 
-  const chartOptions = {
-    responsive: true,
-    plugins: {
-      legend: {
-        position: 'top',
-      },
-      title: {
-        display: true,
-        text: '7-Day Air Quality Trends'
-      }
-    },
-    scales: {
-      y: {
-        beginAtZero: true,
+  const chartDataCorrelation = useMemo(() => {
+    const air = historicalData?.air
+    const weather = historicalData?.weather
+
+    return {
+      labels: chartLabels,
+      datasets: [
+        {
+          label: 'PM2.5 (µg/m³)',
+          data: air?.pm2_5 || [],
+          borderColor: '#3B82F6',
+          backgroundColor: 'rgba(59, 130, 246, 0.10)',
+          tension: 0.35,
+          fill: true
+        },
+        {
+          label: 'PM10 (µg/m³)',
+          data: air?.pm10 || [],
+          borderColor: '#10B981',
+          backgroundColor: 'rgba(16, 185, 129, 0.10)',
+          tension: 0.35,
+          fill: true
+        },
+        {
+          label: 'Temp max (°C)',
+          data: weather?.temperature_2m_max || [],
+          borderColor: '#F59E0B',
+          backgroundColor: 'rgba(245, 158, 11, 0.10)',
+          tension: 0.35,
+          fill: false
+        },
+        {
+          label: 'UV max',
+          data: weather?.uv_index_max || [],
+          borderColor: '#A855F7',
+          backgroundColor: 'rgba(168, 85, 247, 0.10)',
+          tension: 0.35,
+          fill: false
+        }
+      ]
+    }
+  }, [historicalData, chartLabels])
+
+  const chartOptionsCorrelation = useMemo(() => {
+    return {
+      responsive: true,
+      plugins: {
+        legend: { position: 'top' },
         title: {
           display: true,
-          text: 'Concentration (µg/m³)'
+          text: 'Cross-Data Correlation (Air Quality + Weather)'
+        }
+      },
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        y: {
+          beginAtZero: true,
+          title: {
+            display: true,
+            text: 'Values (mixed units)'
+          }
         }
       }
     }
-  }
+  }, [])
+
 
   // Get current AQI for marker
   const currentAQI = airQualityData ? calculateAQI(airQualityData) : 0
@@ -283,10 +480,11 @@ function App() {
           </div>
         </div>
 
-        {/* Climate Health Score */}
+        {/* Climate Health Score (interactive widget) */}
         <div className="mb-6 bg-gradient-to-r from-blue-50 to-green-50 rounded-xl p-4">
-          <h2 className="text-lg font-semibold text-gray-700 mb-3">Climate Health Score</h2>
-          <div className="relative w-full h-32">
+          <h2 className="text-lg font-semibold text-gray-700 mb-3">Interactive Climate Health Score</h2>
+
+          <div className="relative w-full h-32 mb-4">
             <svg className="w-full h-full" viewBox="0 0 100 50">
               <path
                 d="M 10 40 A 30 30 0 0 1 90 40"
@@ -301,13 +499,109 @@ function App() {
                 strokeWidth="8"
                 strokeDasharray="188"
                 strokeDashoffset={188 - (188 * climateScore) / 100}
-                className="transition-all duration-1000"
+                className="transition-all duration-500"
               />
               <text x="50" y="30" textAnchor="middle" className="text-2xl font-bold fill-gray-800">{climateScore}</text>
               <text x="50" y="45" textAnchor="middle" className="text-sm fill-gray-600">/100</text>
             </svg>
           </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            {/* Weight sliders drive immediate score updates */}
+            <div className="bg-white/60 rounded-lg p-3">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs text-gray-600">AQI</span>
+                <span className="text-xs font-semibold text-gray-800">{Math.round(scoreWeights.aqi * 100)}%</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                step="5"
+                value={Math.round(scoreWeights.aqi * 100)}
+                onChange={(e) => setScoreWeights((w) => ({ ...w, aqi: Number(e.target.value) / 100 }))}
+                className="w-full"
+              />
+            </div>
+
+            <div className="bg-white/60 rounded-lg p-3">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs text-gray-600">UV</span>
+                <span className="text-xs font-semibold text-gray-800">{Math.round(scoreWeights.uv * 100)}%</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                step="5"
+                value={Math.round(scoreWeights.uv * 100)}
+                onChange={(e) => setScoreWeights((w) => ({ ...w, uv: Number(e.target.value) / 100 }))}
+                className="w-full"
+              />
+            </div>
+
+            <div className="bg-white/60 rounded-lg p-3">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs text-gray-600">Temp</span>
+                <span className="text-xs font-semibold text-gray-800">{Math.round(scoreWeights.temperature * 100)}%</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                step="5"
+                value={Math.round(scoreWeights.temperature * 100)}
+                onChange={(e) => setScoreWeights((w) => ({ ...w, temperature: Number(e.target.value) / 100 }))}
+                className="w-full"
+              />
+            </div>
+
+            <div className="bg-white/60 rounded-lg p-3">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs text-gray-600">Humidity</span>
+                <span className="text-xs font-semibold text-gray-800">{Math.round(scoreWeights.humidity * 100)}%</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                step="5"
+                value={Math.round(scoreWeights.humidity * 100)}
+                onChange={(e) => setScoreWeights((w) => ({ ...w, humidity: Number(e.target.value) / 100 }))}
+                className="w-full"
+              />
+            </div>
+          </div>
+
+          {/* Neighborhood stats for the drill-down */}
+          <div className="mt-4">
+            <h3 className="text-sm font-semibold text-gray-700 mb-2">Micro-Climate Neighborhood Drill-down</h3>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs text-gray-600">Radius</span>
+              <span className="text-xs font-semibold text-gray-800">{drillRadiusKm} km</span>
+            </div>
+            <input
+              type="range"
+              min="0.5"
+              max="3"
+              step="0.5"
+              value={drillRadiusKm}
+              onChange={(e) => setDrillRadiusKm(Number(e.target.value))}
+              className="w-full"
+            />
+
+            {neighborhoodStats && (
+              <div className="mt-3 bg-white/60 rounded-lg p-3">
+                <div className="text-xs text-gray-600">Neighborhood AQI snapshot (sampled)</div>
+                <div className="text-sm font-semibold text-gray-800">Avg: {neighborhoodStats.aqiAvg}</div>
+                <div className="text-xs text-gray-600">Min/Max: {neighborhoodStats.aqiMin} / {neighborhoodStats.aqiMax}</div>
+                <div className="text-[11px] text-gray-500 mt-1">Shows local pockets—industrial vs park-like micro-conditions.</div>
+              </div>
+            )}
+          </div>
+
         </div>
+
 
         {/* Current Air Quality */}
         {airQualityData && (
@@ -386,6 +680,19 @@ function App() {
               attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
             />
             <MapController position={position} />
+
+            {/* Micro-climate radius overlay */}
+            <Circle
+              center={position}
+              radius={drillRadiusKm * 1000}
+              pathOptions={{
+                color: '#2563EB',
+                weight: 2,
+                fillColor: '#60A5FA',
+                fillOpacity: 0.12
+              }}
+            />
+
             <Marker position={position} 
               icon={L.divIcon({
                 className: 'aqi-marker',
@@ -403,6 +710,7 @@ function App() {
               </Popup>
             </Marker>
           </MapContainer>
+
           
           {/* Loading overlay */}
           {loading && (
@@ -415,12 +723,17 @@ function App() {
           )}
         </div>
 
-        {/* Chart */}
+        {/* Cross-Data Correlation: Air Quality + Weather sync timeline */}
         {historicalData && (
-          <div className="h-64 bg-white p-4 border-t">
-            <Line options={chartOptions} data={chartData} />
+          <div className="h-[28rem] bg-white p-4 border-t">
+            <Line options={chartOptionsCorrelation} data={chartDataCorrelation} />
+            <div className="mt-2 text-xs text-gray-500">
+              Unified timeline: PM2.5/PM10 overlaid with temperature & UV. This helps explain “why” conditions shift.
+            </div>
           </div>
         )}
+
+
       </div>
     </div>
   )
