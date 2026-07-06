@@ -1,18 +1,20 @@
-- [x] Inspect current code paths for score update and UI state flow (done)
-- [x] Implement Micro-Climate Neighborhood Drill-down UI + Leaflet overlay + neighborhood statistics
-- [x] Implement Conversational AI Data Translator using an LLM API (VITE_* env var) with fallback to existing rule-based insight
-- [x] Implement Cross-Data Correlation timeline chart overlay (weather + air quality on shared time axis)
-- [x] Implement Interactive Climate Health Score widget with metric toggles/weights (score updates immediately)
-- [x] Update README.md with LLM API env var instructions
-- [x] Run app (npm run dev) and verify all UI requirements render and score changes correctly
-- [ ] git add/commit with proper message and push
+# TODO - Deploy GeoSustain to Render
 
+## Step 1: Identify Render failure cause
+- Use provided Render logs: build failed with `sh: 1: vite: not found`.
 
+## Step 2: Fix Render Node/tooling mismatch
+- In Render Web Service settings:
+  - Set Node version to Node 18.x (e.g., 18.20.4)
 
+## Step 3: Ensure dependencies install
+- Confirm Render uses `npm install` before build.
+- If Render has an optional Install command, set it to:
+  - `npm install`
 
+## Step 4: Deploy again
+- Redeploy after changes.
 
-
-
-
-
+## Step 5: If it still fails
+- Paste Render build/start logs here.
 
